@@ -20,6 +20,9 @@ plotly>=5.15.0
 # XAI
 shap>=0.42.0
 
+# HPO
+optuna>=4.0.0
+
 # Config & Utils
 pyyaml>=6.0
 holidays>=0.28
