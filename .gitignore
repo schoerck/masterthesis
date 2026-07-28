@@ -5,9 +5,9 @@ __pycache__/
 .ipynb_checkpoints/
 
 # Trainings-Artefakte (werden reproduziert, zu groß fürs Repo)
-models/
-output/
-logs/
+/models/
+/output/
+/logs/
 lightning_logs/
 
 # API-Caches
