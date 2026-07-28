@@ -30,8 +30,13 @@ Start automatisch dort fort (`load_if_exists=True`).
 2. Oben in der Lauf-Zelle `MODEL` und `HORIZON` setzen.
 3. Laufzeit → Laufzeittyp ändern → **GPU (T4)**.
 4. Laufzeit → **Alle ausführen**. Beim ersten Mal Drive-Zugriff bestätigen.
-5. Fenster/Laptop schließen — mit Colab Pro läuft der Lauf im Hintergrund
-   weiter und sichert sich selbst nach Drive (`MyDrive/thesis_hpo/`).
+5. **Achtung Tarif-Detail:** Echte *Background Execution* (Browser/Laptop
+   komplett zu, Lauf läuft bis 24 h weiter) bietet nur **Colab Pro+**.
+   Mit **Colab Pro** endet die Session einige Zeit nach dem Trennen der
+   Verbindung. Das ist dank Resume verkraftbar: Es gehen höchstens
+   ~10 Minuten seit der letzten Drive-Sicherung verloren, und ein
+   erneutes „Alle ausführen" setzt die Optimierung automatisch beim
+   letzten Trial fort (Etappen-Modus).
 
 ### Empfohlene Reihenfolge der Läufe
 
