@@ -26,7 +26,7 @@ Start automatisch dort fort (`load_if_exists=True`).
 ## Pro Lauf
 
 1. `notebooks/colab_hpo.ipynb` in Colab öffnen
-   (https://colab.research.google.com/github/<USER>/<REPO>/blob/main/notebooks/colab_hpo.ipynb).
+   (https://colab.research.google.com/github/schoerck/masterthesis/blob/main/notebooks/colab_hpo.ipynb).
 2. Oben in der Lauf-Zelle `MODEL` und `HORIZON` setzen.
 3. Laufzeit → Laufzeittyp ändern → **GPU (T4)**.
 4. Laufzeit → **Alle ausführen**. Beim ersten Mal Drive-Zugriff bestätigen.
@@ -60,7 +60,7 @@ finale Training die optimierten Parameter.
 ## Lokales Repo zu GitHub pushen (einmalig)
 
 ```bash
-git remote add origin https://github.com/<USER>/<REPO>.git
+git remote add origin https://github.com/schoerck/masterthesis.git
 git push -u origin main
 ```
 
