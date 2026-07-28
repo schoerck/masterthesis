@@ -1,12 +1,45 @@
-# HPO-Läufe auf Google Colab (Laptop darf zu)
+# HPO-Läufe remote (Laptop darf zu)
 
-Die Hyperparameter-Optimierung läuft auf Colab-GPUs statt auf dem Laptop.
-Der Lauf ist abbruchsicher: Optuna speichert jeden Trial in einer
-SQLite-Datenbank (`output/optimization/studies/`), das Colab-Notebook
-sichert diese alle 10 Minuten nach Google Drive und setzt beim nächsten
-Start automatisch dort fort (`load_if_exists=True`).
+Die Hyperparameter-Optimierung läuft auf gemieteter GPU statt auf dem
+Laptop. Alle Wege sind abbruchsicher: Optuna speichert jeden Trial in
+einer SQLite-Datenbank (`output/optimization/studies/`) und setzt beim
+nächsten Start automatisch dort fort (`load_if_exists=True`).
 
-## Einmalige Einrichtung (ca. 10 Minuten)
+- **Weg A (empfohlen): GPU-Pod bei RunPod** — kein Sessionlimit, stoppt
+  sich nach Abschluss selbst, ca. 10–15 $ für alle vier Läufe.
+- **Weg B: Google Colab** — Etappen-Modus; echtes Background nur mit
+  Pro+.
+
+## Weg A: GPU-Pod bei RunPod (empfohlen)
+
+### Einmalig
+
+1. Konto auf runpod.io anlegen und Guthaben laden (~20 $ reichen).
+2. SSH-Key hinterlegen: RunPod → Settings → SSH Public Keys → Inhalt
+   von `~/.ssh/runpod_thesis.pub` einfügen (liegt lokal bereit).
+
+### Pod starten
+
+1. Deploy → GPU wählen (RTX 4090, alternativ RTX 3090) → Template
+   **RunPod PyTorch** → Volume ≥ 40 GB → *Deploy On-Demand*.
+2. Pod-Detailseite → *Connect* → SSH-Befehl kopieren und an Claude
+   geben. Ab hier übernimmt Claude: Repo klonen, Abhängigkeiten
+   installieren, Lauf in `tmux` starten (`scripts/remote_hpo.sh`).
+3. Laptop zu. Das Skript arbeitet alle vier Läufe seriell ab
+   (Timeout je Lauf 8 h, per `TIMEOUT` übersteuerbar), loggt nach
+   `output/optimization/logs/` und **stoppt den Pod danach selbst** —
+   die Abrechnung endet, das Volume mit den Ergebnissen bleibt
+   erhalten (~4 $/Monat, bis der Pod terminiert wird).
+
+### Ergebnisse zurückholen
+
+Pod in der Web-UI kurz starten → Claude zieht `output/optimization/`
+per `scp` auf den Laptop → danach Pod **terminieren** (löscht Volume,
+beendet alle Restkosten).
+
+## Weg B: Google Colab
+
+### Einmalige Einrichtung (ca. 10 Minuten)
 
 1. **Colab Pro abonnieren** (colab.google) — nötig für *Background
    Execution*: Nur damit läuft das Notebook nach dem Schließen des
