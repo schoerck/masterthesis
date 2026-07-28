@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+
+# Trainings-Artefakte (werden reproduziert, zu groß fürs Repo)
+models/
+output/
+logs/
+lightning_logs/
+
+# API-Caches
+.openmeteo_cache*
+.openmeteo_forecast_cache*
+
+# macOS
+.DS_Store
+
+# Lokales
+.claude/
+*.log

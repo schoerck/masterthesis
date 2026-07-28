@@ -1,0 +1,109 @@
+# ============================================================
+# Konfiguration: Residuallast-Prognose Masterarbeit
+# ============================================================
+
+# --- Daten ---
+data:
+  # SMARD API
+  smard:
+    base_url: "https://www.smard.de/app/chart_data"
+    region: "DE"
+    resolution: "hour"
+    filters:
+      residual_load: 4359
+      total_load: 410
+      solar: 4068
+      wind_onshore: 4067
+      wind_offshore: 1225
+    start_date: "2021-01-01"
+    end_date: "2025-12-31"
+
+  # Open-Meteo Wetterdaten (ERA5-Reanalyse via Open-Meteo Historical API)
+  # Sampling-Punkte und Bundesland-Gewichte sind in weather_loader.py definiert:
+  #   - 45 Punkte in 16 Bundesländern
+  #   - Gewichte aus Destatis (Bevölkerung) + BNetzA MaStR (Wind/Solar, Stand 2024)
+  # Ergebnis: 3 physikalisch motivierte Aggregate:
+  #   weather_temperature  → Temperatur, bevölkerungsgewichtet
+  #   weather_wind_100m    → Wind 100m, windkapazitätsgewichtet
+  #   weather_radiation    → Globalstrahlung, PV-kapazitätsgewichtet
+  weather:
+    variables:
+      - "temperature_2m"       # → weather_temperature  (Lastseite: Heiz-/Kühlbedarf)
+      - "wind_speed_100m"      # → weather_wind_100m    (Nabenhöhe Windturbinen)
+      - "shortwave_radiation"  # → weather_radiation    (PV-Einspeisung)
+    start_date: "2021-01-01"
+    end_date: "2025-12-31"
+
+  # Pfade
+  paths:
+    raw: "data/raw"
+    processed: "data/processed"
+
+# --- Preprocessing ---
+preprocessing:
+  target_frequency: "1h"         # Stündliche Aggregation
+  interpolation_method: "linear"
+  max_gap_hours: 6               # Max Lücke für Interpolation
+
+  # Datums-basiertes chronologisches Splitting auf volle Kalenderjahre.
+  # So decken Validation und Test alle Saisons (Winter-Heizlast, Sommer-PV-
+  # Spitzen) gleichermaßen ab — methodisch zwingend wegen der starken
+  # Jahressaisonalität der Residuallast.
+  #   Train: 2021-01-01 → 2023-12-31  (3 volle Jahre, ~26.000 Stunden)
+  #   Val:   2024-01-01 → 2024-12-31  (1 volles Jahr, Schaltjahr, ~8.784 h)
+  #   Test:  2025-01-01 → 2025-12-31  (1 volles Jahr, ~8.760 Stunden)
+  train_end_date: "2023-12-31"   # letzter Tag des Train-Sets (einschließlich)
+  val_end_date:   "2024-12-31"   # letzter Tag des Validation-Sets (einschließlich)
+                                 # Test umfasst alle Daten danach bis end_date
+
+# --- Modelle ---
+models:
+  seed: 42
+  forecast_horizons:
+    day_ahead: 24     # 24h
+    week_ahead: 168   # 168h
+
+  tft:
+    input_chunk_length: 168      # 1 Woche Lookback (gleich wie Regression & XGBoost → fairer Vergleich)
+    hidden_size: 128             # Ausreichend Kapazität für Wetter- und Lag-Kovariaten
+    lstm_layers: 1
+    num_attention_heads: 4
+    dropout: 0.2                 # Stärkere Regularisierung gegen Overfitting auf 4 Jahre Daten
+    batch_size: 64
+    n_epochs: 200                # Early Stopping stoppt automatisch beim Optimum
+    early_stopping_patience: 25  # Stoppt wenn 25 Epochen keine Verbesserung
+    learning_rate: 0.001         # Adam-Startlernrate; ReduceLROnPlateau senkt LR dynamisch ab
+    quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+
+
+  xgboost:
+    lags: 168                    # Target-Lags, 1 Woche (= Regression & TFT)
+    n_estimators: 600            # Bäume pro Quantil × Horizont-Schritt (600 × 0.04 LR = gute Konvergenz)
+    max_depth: 8                 # Tiefere Bäume für mehr Feature-Interaktionen (Wetter × Zeit × Last-Lags)
+    learning_rate: 0.04          # Moderat, profitiert von höheren n_estimators
+    subsample: 0.8               # Stochastic Gradient Boosting (Zeilen)
+    colsample_bytree: 0.8        # Feature-Subsampling pro Baum (Dekorrelation)
+    min_child_weight: 5          # Mindest-Hessian pro Blatt (Regularisierung)
+    reg_alpha: 0.0               # Keine L1-Regularisierung (kein Sparse-Feature-Bedarf)
+    reg_lambda: 1.0              # Klassische L2-Regularisierung
+    tree_method: "hist"          # Histogramm-Tree (schnellster stabiler Modus auf CPU)
+    n_jobs: -1                   # Alle verfügbaren CPU-Kerne (stabil, anders als lightgbm-libomp)
+    multi_models: true           # true = direkte Strategie: 24 Spezialisten pro Quantil
+                                 # (identisch zur Regression-Baseline → sauberer Paradigmenvergleich).
+                                 # Keine Error-Akkumulation über den Horizont.
+    quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]   # Identisch zu TFT → fairer Pinball-Loss-Vergleich
+
+  regression:
+    lags: 168                    # 1 Woche Lookback (gleich wie TFT & XGBoost)
+    quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+
+# --- Evaluation ---
+evaluation:
+  backtesting:
+    stride: 24                   # Alle 24h neue Prognose
+    last_points_only: false
+  metrics:
+    - "mae"
+    - "rmse"
+    - "r2"
+    - "pinball_loss"
