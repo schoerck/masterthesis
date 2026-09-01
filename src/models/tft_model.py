@@ -45,6 +45,7 @@ def build_tft_model(
     model_name: str = "tft",
     work_dir: str = "models",
     use_gpu: bool = True,
+    early_stopping_enabled: bool = True,
 ) -> TFTModel:
     """
     Erstellt ein TFT-Modell.
@@ -108,14 +109,18 @@ def build_tft_model(
     # Early Stopping: Stoppt automatisch wenn der Validierungsfehler
     # sich nach 'patience' Epochen nicht mehr verbessert.
     # Das beste Modell (niedrigster Val-Loss) wird automatisch gespeichert.
-    early_stopper = EarlyStopping(
-        monitor="val_loss",
-        patience=early_stopping_patience,
-        min_delta=0.0001,           # Minimale Verbesserung um als "besser" zu gelten
-        mode="min",                 # Niedrigerer Loss = besser
-        verbose=True,
-    )
-    pl_trainer_kwargs["callbacks"] = [early_stopper]
+    # Beim finalen Training auf Train+Val gibt es keine Validierungsmenge
+    # mehr — dann wird mit early_stopping_enabled=False eine feste
+    # Epochenzahl trainiert (n_epochs = beste Epoche des Val-Laufs).
+    if early_stopping_enabled:
+        early_stopper = EarlyStopping(
+            monitor="val_loss",
+            patience=early_stopping_patience,
+            min_delta=0.0001,           # Minimale Verbesserung um als "besser" zu gelten
+            mode="min",                 # Niedrigerer Loss = besser
+            verbose=True,
+        )
+        pl_trainer_kwargs["callbacks"] = [early_stopper]
 
     model = TFTModel(
         input_chunk_length=input_chunk_length,
@@ -127,13 +132,17 @@ def build_tft_model(
         batch_size=batch_size,
         n_epochs=n_epochs,
         optimizer_kwargs={"lr": learning_rate},
-        # LR Scheduler: Halbiert die Lernrate automatisch wenn val_loss
-        # sich 5 Epochen lang nicht verbessert → feineres Lernen
+        # LR Scheduler: Halbiert die Lernrate automatisch wenn der überwachte
+        # Verlust sich 8 Epochen lang nicht verbessert → feineres Lernen.
+        # Beim finalen Training auf Train+Val existiert kein val_loss mehr —
+        # dann überwacht der Scheduler den Trainingsverlust (sonst wirft
+        # Lightning eine MisconfigurationException).
         lr_scheduler_cls=ReduceLROnPlateau,
         lr_scheduler_kwargs={
             "patience": 8,       # 8 Epochen warten bevor LR gesenkt wird
             "factor": 0.5,       # LR halbieren
             "min_lr": 1e-6,      # Nicht unter 0.000001 gehen
+            "monitor": "val_loss" if early_stopping_enabled else "train_loss",
         },
         likelihood=QuantileRegression(quantiles=quantiles),
         random_state=random_state,

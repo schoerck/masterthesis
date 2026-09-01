@@ -664,23 +664,19 @@ def build_rolling_forecast_dataframe(
         actual_vals = actual_slice[:min_len].values().flatten()
         pred_vals = pred_unscaled[:min_len].values().flatten()
 
-        q10_vals = None
-        q90_vals = None
-        if pred_scaled.n_samples > 1 and 0.1 in quantiles and 0.9 in quantiles:
+        # Alle Quantilspalten (q10, q25, q50, q75, q90) — Kapitel 4 braucht
+        # neben dem 80-%-Band auch das innere Paar für die Asymmetrie-Analyse.
+        q_cols: dict[str, np.ndarray] = {}
+        if pred_scaled.n_samples > 1:
             q_preds = quantile_extractor_fn(pred_scaled, quantiles)
-            idx_10 = quantiles.index(0.1)
-            idx_90 = quantiles.index(0.9)
-
-            q10_ts = TimeSeries.from_times_and_values(
-                pred_scaled.time_index[:min_len],
-                q_preds[:min_len, idx_10],
-            )
-            q90_ts = TimeSeries.from_times_and_values(
-                pred_scaled.time_index[:min_len],
-                q_preds[:min_len, idx_90],
-            )
-            q10_vals = scaler.inverse_transform(q10_ts).values().flatten()
-            q90_vals = scaler.inverse_transform(q90_ts).values().flatten()
+            for qi, q in enumerate(quantiles):
+                q_ts = TimeSeries.from_times_and_values(
+                    pred_scaled.time_index[:min_len],
+                    q_preds[:min_len, qi],
+                )
+                q_cols[f"q{int(round(q * 100))}"] = (
+                    scaler.inverse_transform(q_ts).values().flatten()
+                )
 
         for i, ts in enumerate(pred_unscaled.time_index[:min_len]):
             row = {
@@ -688,9 +684,8 @@ def build_rolling_forecast_dataframe(
                 "actual": actual_vals[i],
                 "prediction": pred_vals[i],
             }
-            if q10_vals is not None and q90_vals is not None:
-                row["q10"] = q10_vals[i]
-                row["q90"] = q90_vals[i]
+            for col, vals in q_cols.items():
+                row[col] = vals[i]
             rows.append(row)
 
     if not rows:
@@ -698,10 +693,9 @@ def build_rolling_forecast_dataframe(
 
     forecast_df = pd.DataFrame(rows)
     agg_map = {"actual": "first", "prediction": "mean"}
-    if "q10" in forecast_df.columns:
-        agg_map["q10"] = "mean"
-    if "q90" in forecast_df.columns:
-        agg_map["q90"] = "mean"
+    for col in forecast_df.columns:
+        if col.startswith("q") and col[1:].isdigit():
+            agg_map[col] = "mean"
 
     forecast_df = (
         forecast_df.groupby("timestamp", as_index=False)
@@ -781,23 +775,19 @@ def build_validation_forecast_dataframe(
         actual_vals = actual_slice[:min_len].values().flatten()
         pred_vals = pred_unscaled[:min_len].values().flatten()
 
-        q10_vals = None
-        q90_vals = None
-        if pred_scaled.n_samples > 1 and 0.1 in quantiles and 0.9 in quantiles:
+        # Alle Quantilspalten (q10, q25, q50, q75, q90) — Kapitel 4 braucht
+        # neben dem 80-%-Band auch das innere Paar für die Asymmetrie-Analyse.
+        q_cols: dict[str, np.ndarray] = {}
+        if pred_scaled.n_samples > 1:
             q_preds = quantile_extractor_fn(pred_scaled, quantiles)
-            idx_10 = quantiles.index(0.1)
-            idx_90 = quantiles.index(0.9)
-
-            q10_ts = TimeSeries.from_times_and_values(
-                pred_scaled.time_index[:min_len],
-                q_preds[:min_len, idx_10],
-            )
-            q90_ts = TimeSeries.from_times_and_values(
-                pred_scaled.time_index[:min_len],
-                q_preds[:min_len, idx_90],
-            )
-            q10_vals = scaler.inverse_transform(q10_ts).values().flatten()
-            q90_vals = scaler.inverse_transform(q90_ts).values().flatten()
+            for qi, q in enumerate(quantiles):
+                q_ts = TimeSeries.from_times_and_values(
+                    pred_scaled.time_index[:min_len],
+                    q_preds[:min_len, qi],
+                )
+                q_cols[f"q{int(round(q * 100))}"] = (
+                    scaler.inverse_transform(q_ts).values().flatten()
+                )
 
         for i, ts in enumerate(pred_unscaled.time_index[:min_len]):
             row = {
@@ -805,9 +795,8 @@ def build_validation_forecast_dataframe(
                 "actual": actual_vals[i],
                 "prediction": pred_vals[i],
             }
-            if q10_vals is not None and q90_vals is not None:
-                row["q10"] = q10_vals[i]
-                row["q90"] = q90_vals[i]
+            for col, vals in q_cols.items():
+                row[col] = vals[i]
             rows.append(row)
 
     if not rows:
@@ -815,10 +804,9 @@ def build_validation_forecast_dataframe(
 
     forecast_df = pd.DataFrame(rows)
     agg_map = {"actual": "first", "prediction": "mean"}
-    if "q10" in forecast_df.columns:
-        agg_map["q10"] = "mean"
-    if "q90" in forecast_df.columns:
-        agg_map["q90"] = "mean"
+    for col in forecast_df.columns:
+        if col.startswith("q") and col[1:].isdigit():
+            agg_map[col] = "mean"
 
     forecast_df = (
         forecast_df.groupby("timestamp", as_index=False)
@@ -1403,6 +1391,312 @@ def command_calibrate(config: dict, args):
 
 
 # ════════════════════════════════════════════════════════════════════
+#  Finales Training (Train+Val) + Testbewertung + ACI — Kapitel-4-Daten
+# ════════════════════════════════════════════════════════════════════
+
+FINAL_DIR = Path("output/final")
+
+
+def load_best_hpo_params(model_name: str, target_name: str, horizon_name: str) -> dict:
+    """Liest die beste Konfiguration aus der Optuna-Studien-Datenbank."""
+    import optuna
+
+    db_path = (
+        Path("output/optimization/studies")
+        / f"{build_artifact_stem(model_name, target_name, horizon_name)}.db"
+    )
+    if not db_path.exists():
+        raise FileNotFoundError(
+            f"HPO-Studie fehlt: {db_path}. Bitte zuerst 'optimize' ausführen."
+        )
+    study = optuna.load_study(study_name=None, storage=f"sqlite:///{db_path}")
+    best = study.best_trial
+    logger.info(
+        "[final/%s] Beste HPO-Konfiguration (Trial %d, Pinball=%.2f): %s",
+        model_name, best.number, best.value, best.params,
+    )
+    return dict(best.params)
+
+
+def _extract_tft_best_epoch(model) -> dict:
+    """Bestimmt die Epoche des besten Validierungsverlusts nach Early Stopping.
+
+    Early Stopping beendet das Training `patience` Epochen NACH dem Optimum.
+    Primärquelle ist der Callback: Bei ausgelöstem Stop liegt das Optimum bei
+    stopped_epoch − wait_count (0-indexiert), als Epochenzahl für das finale
+    Training also +1. Der Fallback epochs_trained − wait_count greift nur,
+    wenn das Training das Epochenlimit erreichte — model.epochs_trained ist
+    nach dem Reload des besten Checkpoints nicht verlässlich (liefert 0),
+    deshalb zählt der Callback zuerst.
+    """
+    epochs_trained = int(getattr(model, "epochs_trained", 0) or 0)
+    wait_count = 0
+    stopped_epoch = 0
+    for accessor in (
+        lambda m: m.model.trainer.early_stopping_callback,
+        lambda m: m.trainer.early_stopping_callback,
+    ):
+        try:
+            cb = accessor(model)
+            if cb is not None:
+                wait_count = int(getattr(cb, "wait_count", 0) or 0)
+                stopped_epoch = int(getattr(cb, "stopped_epoch", 0) or 0)
+                break
+        except Exception:
+            continue
+    if stopped_epoch > 0:
+        best_epoch = max(1, stopped_epoch - wait_count + 1)
+    else:
+        best_epoch = max(1, epochs_trained - wait_count)
+    return {
+        "epochs_trained": epochs_trained,
+        "wait_count": wait_count,
+        "stopped_epoch": stopped_epoch,
+        "best_epoch": best_epoch,
+    }
+
+
+def _band_pinball(df: pd.DataFrame, lower_col: str, upper_col: str) -> float:
+    """Mittlerer Pinball-Loss des 80-%-Band-Paars (q10/q90)."""
+    actual = df["actual"].to_numpy(dtype=float)
+    losses = []
+    for q, col in ((0.1, lower_col), (0.9, upper_col)):
+        err = actual - df[col].to_numpy(dtype=float)
+        losses.append(np.mean(np.where(err >= 0, q * err, (q - 1) * err)))
+    return float(np.mean(losses))
+
+
+def compute_final_metrics(df: pd.DataFrame, quantiles: list[float]) -> dict:
+    """Punkt- und Verteilungsmetriken aus einem Forecast-DataFrame."""
+    actual = df["actual"].to_numpy(dtype=float)
+    pred = df["prediction"].to_numpy(dtype=float)
+
+    mae = float(np.mean(np.abs(actual - pred)))
+    rmse = float(np.sqrt(np.mean((actual - pred) ** 2)))
+    ss_res = float(np.sum((actual - pred) ** 2))
+    ss_tot = float(np.sum((actual - np.mean(actual)) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+
+    out = {"MAE": mae, "RMSE": rmse, "R2": r2, "n": int(len(df))}
+
+    q_losses = []
+    for q in quantiles:
+        col = f"q{int(round(q * 100))}"
+        if col not in df.columns:
+            continue
+        err = actual - df[col].to_numpy(dtype=float)
+        q_losses.append(np.mean(np.where(err >= 0, q * err, (q - 1) * err)))
+    if q_losses:
+        out["pinball_mean"] = float(np.mean(q_losses))
+    return out
+
+
+def command_final_train(config: dict, args):
+    """Finales Training mit den besten HPO-Konfigurationen (Design: 3.2.7).
+
+    Ablauf je Modell:
+      1. Val-Lauf: Modell allein auf Train trainieren, rollierend auf Val
+         prognostizieren → Konformitätsscores für c0/gamma; beim TFT
+         zusätzlich die beste Epochenzahl (gecacht in output/final/).
+      2. Finales Training auf Train+Val. TFT: Epochenzahl fixiert, kein
+         Early Stopping. Skalierung unverändert aus der Trainingsmenge.
+      3. Rollierende Testbewertung (Stride aus config), unkalibriert.
+      4. ACI auf dem 80-%-Band (c0/gamma aus Schritt 1).
+      5. Kennzahlen roh vs. kalibriert → CSV + Meta-JSON.
+    """
+    from src.calibration import calibrate_forecast_adaptive
+    from src.calibration.conformal import evaluate_coverage
+
+    ensure_output_dirs()
+    FINAL_DIR.mkdir(parents=True, exist_ok=True)
+    _, _, _, _, datasets_direct, datasets_indirect = prepare_datasets(config)
+    datasets = get_target_datasets(datasets_direct, datasets_indirect, args.target)
+    horizon_hours = get_horizon_hours(config, args.horizon)
+    quantiles = config["models"]["tft"]["quantiles"]
+    stride = config["evaluation"]["backtesting"]["stride"]
+    model_defs = get_model_defs(config)
+
+    model_names = (
+        ["regression", "xgboost", "tft"] if args.model == "all" else [args.model]
+    )
+
+    result_rows = []
+    for name in model_names:
+        model_def = model_defs[name]
+        stem = build_artifact_stem(name, args.target, args.horizon)
+        meta_path = FINAL_DIR / f"{stem}_final_meta.json"
+        val_path = FINAL_DIR / f"{stem}_final_validation_forecast.csv"
+
+        best_params = load_best_hpo_params(name, args.target, args.horizon)
+        cfg = dict(model_def["config"])
+        cfg.update(best_params)
+
+        # ── Schritt 1: Val-Lauf (Train-only) — gecacht ───────────────
+        meta: dict = {}
+        cached_ok = False
+        if val_path.exists() and meta_path.exists():
+            meta = json.loads(meta_path.read_text())
+            cached_ok = meta.get("best_params") == best_params and (
+                name != "tft" or meta.get("tft_best_epoch")
+            )
+        if cached_ok:
+            logger.info("[final/%s] Verwende gecachten Val-Lauf: %s", name, val_path)
+            val_df = pd.read_csv(val_path, parse_dates=["timestamp"])
+        else:
+            logger.info(
+                "[final/%s] Val-Lauf: Training auf Train, rollierende "
+                "Bewertung auf Val (Stride %d h) ...", name, stride,
+            )
+            model_val = model_def["builder"](**cfg)
+            model_val = train_model(model_val, model_def["trainer"], datasets, name)
+            meta = {"model": name, "best_params": best_params}
+            if name == "tft":
+                epoch_info = _extract_tft_best_epoch(model_val)
+                meta["tft_epoch_info"] = epoch_info
+                meta["tft_best_epoch"] = epoch_info["best_epoch"]
+                logger.info("[final/tft] Beste Epoche aus Val-Lauf: %s", epoch_info)
+            val_df = build_validation_forecast_dataframe(
+                model=model_val,
+                predictor_fn=model_def["predictor"],
+                quantile_extractor_fn=model_def["quantile_fn"],
+                datasets=datasets,
+                model_name=name,
+                horizon_hours=horizon_hours,
+                quantiles=quantiles,
+                stride=stride,
+            )
+            val_df.to_csv(val_path, index=False)
+            meta_path.write_text(json.dumps(meta, indent=2, default=str))
+            logger.info("[final/%s] Val-Forecast gespeichert: %s", name, val_path)
+
+        # ── Schritt 2: Finales Training auf Train+Val ────────────────
+        final_cfg = dict(cfg)
+        if name == "tft":
+            final_cfg["n_epochs"] = int(meta["tft_best_epoch"])
+            final_cfg["early_stopping_enabled"] = False
+            final_cfg["model_name"] = "tft_final"
+            logger.info(
+                "[final/tft] Fixierte Epochenzahl für Train+Val: %d",
+                final_cfg["n_epochs"],
+            )
+        logger.info("[final/%s] Finales Training auf Train+Val ...", name)
+        model_final = model_def["builder"](**final_cfg)
+        target_trainval = datasets["target_train_scaled"].append(
+            datasets["target_val_scaled"]
+        )
+        model_final.fit(
+            series=target_trainval,
+            past_covariates=datasets["past_cov_full"],
+            future_covariates=datasets["future_cov_full"],
+        )
+        final_model_path = ARTIFACTS_DIR / f"{stem}_final.pkl"
+        try:
+            model_final.save(str(final_model_path))
+            logger.info("[final/%s] Modell gespeichert: %s", name, final_model_path)
+        except Exception as exc:
+            logger.warning("[final/%s] Modell-Speichern fehlgeschlagen: %s", name, exc)
+
+        # ── Schritt 3: Testbewertung (roh) ───────────────────────────
+        logger.info(
+            "[final/%s] Rollierende Testbewertung (Stride %d h) ...", name, stride,
+        )
+        test_df = build_rolling_forecast_dataframe(
+            model=model_final,
+            predictor_fn=model_def["predictor"],
+            quantile_extractor_fn=model_def["quantile_fn"],
+            datasets=datasets,
+            model_name=name,
+            horizon_hours=horizon_hours,
+            quantiles=quantiles,
+            stride=stride,
+        )
+        test_path = FINAL_DIR / f"{stem}_final_forecast.csv"
+        test_df.to_csv(test_path, index=False)
+        logger.info("[final/%s] Test-Forecast gespeichert: %s", name, test_path)
+
+        # ── Schritt 4: ACI auf dem 80-%-Band ─────────────────────────
+        test_cal, report = calibrate_forecast_adaptive(
+            val_df=val_df,
+            test_df=test_df,
+            quantile_pairs={"80": ("q10", "q90", 0.8)},
+        )
+        cal_path = FINAL_DIR / f"{stem}_final_forecast_calibrated.csv"
+        test_cal.to_csv(cal_path, index=False)
+        logger.info("[final/%s] Kalibrierter Forecast gespeichert: %s", name, cal_path)
+
+        # ── Schritt 5: Kennzahlen roh vs. kalibriert ─────────────────
+        info = report["80"]
+        metrics = compute_final_metrics(test_df, quantiles)
+        cov_raw = evaluate_coverage(
+            test_df["actual"].to_numpy(float),
+            test_df["q10"].to_numpy(float),
+            test_df["q90"].to_numpy(float),
+        )
+        row = {
+            "model": name,
+            **metrics,
+            "coverage_80_raw": cov_raw["coverage"],
+            "width_80_raw": cov_raw["mean_width"],
+            "coverage_80_aci": info["test_coverage_calibrated"],
+            "width_80_aci": info["test_width_calibrated_mean"],
+            "pinball_band_raw": _band_pinball(test_df, "q10", "q90"),
+            "pinball_band_aci": _band_pinball(test_cal, "q10_cal80", "q90_cal80"),
+            "gamma": info["gamma"],
+            "c0": info["q_hat_init"],
+            "c_mean": info["q_hat_mean"],
+            "c_min": info["q_hat_min"],
+            "c_max": info["q_hat_max"],
+            "val_coverage_raw": info["val_coverage_uncal"],
+            "n_val": info["n_val"],
+            "n_test": info["n_test"],
+        }
+        result_rows.append(row)
+
+        meta["aci"] = {
+            k: info[k]
+            for k in (
+                "gamma", "q_hat_init", "q_hat_mean", "q_hat_min", "q_hat_max",
+                "test_coverage_uncal", "test_coverage_calibrated",
+                "test_width_uncal", "test_width_calibrated_mean",
+            )
+        }
+        meta["test_metrics_raw"] = metrics
+        meta_path.write_text(json.dumps(meta, indent=2, default=str))
+
+    results_df = pd.DataFrame(result_rows)
+    out_csv = FINAL_DIR / f"all_models_{args.target}_{args.horizon}_final_results.csv"
+    # Einzelmodell-Läufe ergänzen die Tabelle, statt sie zu überschreiben.
+    if out_csv.exists():
+        old = pd.read_csv(out_csv)
+        old = old[~old["model"].isin(results_df["model"])]
+        results_df = pd.concat([old, results_df], ignore_index=True)
+    results_df.to_csv(out_csv, index=False)
+    logger.info("Finale Ergebnistabelle gespeichert: %s", out_csv)
+
+    print()
+    print(color_text("=" * 100, ANSI_CYAN))
+    print(color_text(
+        "FINALE TESTBEWERTUNG (Train+Val-Modelle, taegliches Raster) — "
+        "roh vs. ACI-kalibriert", ANSI_CYAN,
+    ))
+    print(color_text("=" * 100, ANSI_CYAN))
+    print(
+        f"{'Modell':<12} {'MAE':>8} {'RMSE':>8} {'R2':>6} {'Pinball':>9}  "
+        f"{'Cov roh':>8} {'Cov ACI':>8}  {'Breite roh':>11} {'Breite ACI':>11}"
+    )
+    print("-" * 100)
+    for row in result_rows:
+        print(
+            f"{row['model']:<12} {row['MAE']:>8.0f} {row['RMSE']:>8.0f} "
+            f"{row['R2']:>6.3f} {row.get('pinball_mean', float('nan')):>9.1f}  "
+            f"{row['coverage_80_raw']:>8.3f} {row['coverage_80_aci']:>8.3f}  "
+            f"{row['width_80_raw']:>11.0f} {row['width_80_aci']:>11.0f}"
+        )
+    print(color_text("=" * 100, ANSI_CYAN))
+    print(f"Artefakte: {FINAL_DIR}/ (Forecasts, kalibrierte Baender, c_t-Verlauf, Meta-JSON)")
+
+
+# ════════════════════════════════════════════════════════════════════
 #  Hyperparameter-Optimierung (Optuna)
 # ════════════════════════════════════════════════════════════════════
 
@@ -1902,6 +2196,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    final_train_parser = subparsers.add_parser(
+        "final-train",
+        help=(
+            "Finales Training auf Train+Val mit den besten HPO-Konfigurationen, "
+            "einmalige Testbewertung und ACI-Kalibrierung (Kapitel-4-Daten)."
+        ),
+    )
+
     for subparser in [train_parser, evaluate_parser, forecast_parser]:
         subparser.add_argument(
             "--model",
@@ -1910,7 +2212,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="Welches Modell verwendet werden soll.",
         )
 
-    for subparser in [run_parser, calibrate_parser, optimize_parser]:
+    for subparser in [run_parser, calibrate_parser, optimize_parser, final_train_parser]:
         subparser.add_argument(
             "--model",
             required=True,
@@ -1922,7 +2224,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
 
     # --target und --horizon gelten für alle Subparser
-    for subparser in [train_parser, evaluate_parser, forecast_parser, run_parser, calibrate_parser, optimize_parser]:
+    for subparser in [train_parser, evaluate_parser, forecast_parser, run_parser, calibrate_parser, optimize_parser, final_train_parser]:
         subparser.add_argument(
             "--target",
             required=True,
@@ -1957,6 +2259,7 @@ def main():
         "pipeline": command_pipeline,
         "calibrate": command_calibrate,
         "optimize": command_optimize,
+        "final-train": command_final_train,
     }
 
     global _COMMAND_START_TIME
@@ -1973,7 +2276,7 @@ def main():
             args.command in {"train", "run"}
             and getattr(args, "model", None) in {"tft", "all"}
         )
-        or args.command == "optimize"
+        or args.command in {"optimize", "final-train"}
     )
 
     status_thread = threading.Thread(
